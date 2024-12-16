@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from layers.Embed import DataEmbedding
 from layers.AutoCorrelation import AutoCorrelationLayer
-from layers.FourierCorrelation import FourierBlock, FourierCrossAttention
+from layers.FourierCorrelation import FourierBlock, FourierCrossAttention, DMDBlock, DMDCrossAttention, EMDBlock, EMDCrossAttention
 from layers.MultiWaveletCorrelation import MultiWaveletCross, MultiWaveletTransform
 from layers.Autoformer_EncDec import Encoder, Decoder, EncoderLayer, DecoderLayer, my_Layernorm, series_decomp
 
@@ -14,7 +14,7 @@ class Model(nn.Module):
     Paper link: https://proceedings.mlr.press/v162/zhou22g.html
     """
 
-    def __init__(self, configs, version='fourier', mode_select='random', modes=32):
+    def __init__(self, configs, version='dmd', mode_select='random', modes=1):
         """
         version: str, for FEDformer, there are two versions to choose, options: [Fourier, Wavelets].
         mode_select: str, for FEDformer, there are two mode selection method, options: [random, low].
@@ -48,6 +48,46 @@ class Model(nn.Module):
                                                   ich=configs.d_model,
                                                   base='legendre',
                                                   activation='tanh')
+        elif self.version == 'dmd':
+            encoder_self_att = DMDBlock(in_channels=configs.d_model,
+                                        out_channels=configs.d_model,
+                                        n_heads=configs.n_heads,
+                                        seq_len=self.seq_len,
+                                        modes=self.modes,
+                                        mode_select_method=self.mode_select)
+            decoder_self_att = DMDBlock(in_channels=configs.d_model,
+                                        out_channels=configs.d_model,
+                                        n_heads=configs.n_heads,
+                                        seq_len=self.seq_len // 2 + self.pred_len,
+                                        modes=self.modes,
+                                        mode_select_method=self.mode_select)
+            decoder_cross_att = DMDCrossAttention(in_channels=configs.d_model,
+                                                  out_channels=configs.d_model,
+                                                  seq_len_q=self.seq_len // 2 + self.pred_len,
+                                                  seq_len_kv=self.seq_len,
+                                                  modes=self.modes,
+                                                  mode_select_method=self.mode_select,
+                                                  num_heads=configs.n_heads)
+        elif self.version == 'emd':
+            encoder_self_att = EMDBlock(in_channels=configs.d_model,
+                                        out_channels=configs.d_model,
+                                        n_heads=configs.n_heads,
+                                        seq_len=self.seq_len,
+                                        modes=self.modes,
+                                        mode_select_method=self.mode_select)
+            decoder_self_att = EMDBlock(in_channels=configs.d_model,
+                                        out_channels=configs.d_model,
+                                        n_heads=configs.n_heads,
+                                        seq_len=self.seq_len // 2 + self.pred_len,
+                                        modes=self.modes,
+                                        mode_select_method=self.mode_select)
+            decoder_cross_att = EMDCrossAttention(in_channels=configs.d_model,
+                                                  out_channels=configs.d_model,
+                                                  seq_len_q=self.seq_len // 2 + self.pred_len,
+                                                  seq_len_kv=self.seq_len,
+                                                  modes=self.modes,
+                                                  mode_select_method=self.mode_select,
+                                                  num_heads=configs.n_heads)
         else:
             encoder_self_att = FourierBlock(in_channels=configs.d_model,
                                             out_channels=configs.d_model,
@@ -116,6 +156,9 @@ class Model(nn.Module):
             self.dropout = nn.Dropout(configs.dropout)
             self.projection = nn.Linear(configs.d_model * configs.seq_len, configs.num_class)
 
+
+
+
     def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
         # decomp init
         mean = torch.mean(x_enc, dim=1).unsqueeze(1).repeat(1, self.pred_len, 1)
@@ -125,7 +168,9 @@ class Model(nn.Module):
         seasonal_init = F.pad(seasonal_init[:, -self.label_len:, :], (0, 0, 0, self.pred_len))
         # enc
         enc_out = self.enc_embedding(x_enc, x_mark_enc)
+        # enc_out = self.batch_norm(enc_out.transpose(1, 2)).transpose(1, 2)
         dec_out = self.dec_embedding(seasonal_init, x_mark_dec)
+        # dec_out = self.batch_norm(dec_out.transpose(1, 2)).transpose(1, 2)
         enc_out, attns = self.encoder(enc_out, attn_mask=None)
         # dec
         seasonal_part, trend_part = self.decoder(dec_out, enc_out, x_mask=None, cross_mask=None, trend=trend_init)

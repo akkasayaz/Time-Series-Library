@@ -22,8 +22,186 @@ def get_frequency_modes(seq_len, modes=64, mode_select_method='random'):
         index = list(range(0, modes))
     index.sort()
     return index
+from PyEMD import EMD
+
+# ########## empirical mode decomposition layer #############
+class EMDBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, n_heads, seq_len, modes=1, mode_select_method='random'):
+        super(EMDBlock, self).__init__()
+        self.n_heads = n_heads
+        self.modes = modes if modes > 0 else seq_len // 2
+        self.head_dim = out_channels // n_heads
+        self.out_channels = out_channels
+        self.weight = nn.Parameter(torch.randn(n_heads, self.head_dim, self.head_dim))
+        nn.init.xavier_uniform_(self.weight)
+
+    def emd_decomposition(self, X):
+        B, L, E = X.shape
+        import time
+
+        t1 = time.time()
+        print(self.modes)
+        emd = EMD(max_imfs=self.modes)
+        reconstructed = []
+        for i in range(B):
+            for j in range(L):
+                imfs = emd(X[i, j].detach().cpu().numpy())
+                reconstructed.append(torch.tensor(imfs[-1], dtype=torch.float32))
+                if i == 0 and j == 0:
+                    print("one decomposition time:", time.time() - t1)
+        reconstructed = torch.stack(reconstructed)
+        
+        # move reconstructed to the device of X
+        reconstructed = reconstructed.to(X.device)
+        print('finish emd decomposition')
+        print('emd decomposition time:', time.time() - t1)
+        return reconstructed
+
+    def forward(self, q, k, v, mask=None):
+        B, L, H, E = q.shape
+        x = q.reshape(B, L, H * E)
+        
+        reconstructed = self.emd_decomposition(x)
+        reconstructed = reconstructed.reshape(B, L, H, E)
+        
+        return reconstructed.contiguous(), None
 
 
+
+#  Emperical Mode Decomposition Cross Attention
+class EMDCrossAttention(nn.Module):
+    def __init__(self, in_channels, out_channels, seq_len_q, seq_len_kv, modes=64, mode_select_method='random', num_heads=8):
+        super(EMDCrossAttention, self).__init__()
+        self.num_heads = num_heads
+        self.head_dim = out_channels // num_heads
+        self.out_channels = out_channels
+        self.q_emd = EMDBlock(in_channels, out_channels, num_heads, seq_len_q, modes, mode_select_method)
+        self.k_emd = EMDBlock(in_channels, out_channels, num_heads, seq_len_kv, modes, mode_select_method)
+        self.v_emd = EMDBlock(in_channels, out_channels, num_heads, seq_len_kv, modes, mode_select_method)
+        self.out_proj = nn.Linear(out_channels, out_channels)
+        self.scale = self.head_dim ** -0.5
+
+    def forward(self, q, k, v, mask=None):
+        # Get EMD representations
+        q_emd, _ = self.q_emd(q, None, None)
+        k_emd, _ = self.k_emd(k, None, None)
+        v_emd, _ = self.v_emd(v, None, None)
+        
+        # Ensure dimensions match for attention
+        B, L_q, H, E = q_emd.shape
+        _, L_k, _, _ = k_emd.shape
+        
+        # Reshape for attention computation
+        q_emd = q_emd.reshape(B, L_q, H * E)
+        k_emd = k_emd.reshape(B, L_k, H * E)
+        v_emd = v_emd.reshape(B, L_k, H * E)
+
+        # Compute attention scores
+        attn = torch.matmul(q_emd, k_emd.transpose(-2, -1)) * self.scale
+        
+        if mask is not None:
+            attn = attn.masked_fill(mask == 0, float('-inf'))
+        attn = torch.softmax(attn, dim=-1)
+
+        # Apply attention to values
+        output = torch.matmul(attn, v_emd)
+        output = self.out_proj(output)
+        
+        return output, attn
+
+# ########## dynamic mode decomposition layer #############
+import torch
+import torch.nn as nn
+from pydmd import DMD
+
+import torch
+import numpy as np
+from pydmd import DMD
+
+
+class DMDBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, n_heads, seq_len, modes=0, mode_select_method='random'):
+        super(DMDBlock, self).__init__()
+        self.n_heads = n_heads
+        self.modes = modes if modes > 0 else seq_len // 2
+        self.head_dim = out_channels // n_heads
+        self.out_channels = out_channels
+        self.weight = nn.Parameter(torch.randn(n_heads, self.head_dim, self.head_dim))
+        nn.init.xavier_uniform_(self.weight)
+
+    def dmd_decomposition(self, X):
+        X_numpy = X.detach().cpu().numpy()
+        B, L, E = X_numpy.shape
+        
+        dmd = DMD(svd_rank=self.modes)
+        dmd.fit(X_numpy.T)
+        reconstruction = dmd.reconstructed_data.T
+        reconstructed = torch.tensor(reconstruction, 
+                                   device=X.device, 
+                                   dtype=X.dtype)
+        # all_reconstructions = []
+        # for i in range(B):
+        #     dmd = DMD(svd_rank=self.modes)
+        #     dmd.fit(X_numpy[i].T)
+        #     reconstruction = dmd.reconstructed_data
+        #     all_reconstructions.append(reconstruction.T)
+            
+        # reconstructed = torch.tensor(np.stack(all_reconstructions), 
+        #                            device=X.device, 
+        #                            dtype=X.dtype)
+        return reconstructed
+
+    def forward(self, q, k, v, mask=None):
+        B, L, H, E = q.shape
+        x = q.reshape(B, L, H * E)
+        
+        reconstructed = self.dmd_decomposition(x)
+        reconstructed = reconstructed.reshape(B, L, H, E)
+        
+        return reconstructed.contiguous(), None
+    
+
+    
+class DMDCrossAttention(nn.Module):
+    def __init__(self, in_channels, out_channels, seq_len_q, seq_len_kv, modes=64, mode_select_method='random', num_heads=8):
+        super(DMDCrossAttention, self).__init__()
+        self.num_heads = num_heads
+        self.head_dim = out_channels // num_heads
+        self.out_channels = out_channels
+        self.q_dmd = DMDBlock(in_channels, out_channels, num_heads, seq_len_q, modes, mode_select_method)
+        self.k_dmd = DMDBlock(in_channels, out_channels, num_heads, seq_len_kv, modes, mode_select_method)
+        self.v_dmd = DMDBlock(in_channels, out_channels, num_heads, seq_len_kv, modes, mode_select_method)
+        self.out_proj = nn.Linear(out_channels, out_channels)
+        self.scale = self.head_dim ** -0.5
+
+    def forward(self, q, k, v, mask=None):
+        # Get DMD representations
+        q_dmd, _ = self.q_dmd(q, None, None)
+        k_dmd, _ = self.k_dmd(k, None, None)
+        v_dmd, _ = self.v_dmd(v, None, None)
+        
+        # Ensure dimensions match for attention
+        B, L_q, H, E = q_dmd.shape
+        _, L_k, _, _ = k_dmd.shape
+        
+        # Reshape for attention computation
+        q_dmd = q_dmd.reshape(B, L_q, H * E)
+        k_dmd = k_dmd.reshape(B, L_k, H * E)
+        v_dmd = v_dmd.reshape(B, L_k, H * E)
+
+        # Compute attention scores
+        attn = torch.matmul(q_dmd, k_dmd.transpose(-2, -1)) * self.scale
+        
+        if mask is not None:
+            attn = attn.masked_fill(mask == 0, float('-inf'))
+        attn = torch.softmax(attn, dim=-1)
+
+        # Apply attention to values
+        output = torch.matmul(attn, v_dmd)
+        output = self.out_proj(output)
+        
+        return output, attn
+    
 # ########## fourier layer #############
 class FourierBlock(nn.Module):
     def __init__(self, in_channels, out_channels, n_heads, seq_len, modes=0, mode_select_method='random'):

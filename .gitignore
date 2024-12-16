@@ -165,3 +165,17 @@ result_anomaly_detection.txt
 scripts/augmentation/
 run_anylearn.py
 environment.txt
+scripts/long_term_forecast/Sp_script/Autoformer.sh
+scripts/long_term_forecast/Sp_script/Crossformer.sh
+scripts/long_term_forecast/Sp_script/FiLM.sh
+scripts/long_term_forecast/Sp_script/iTransformer.sh
+scripts/long_term_forecast/Sp_script/Mamba.sh
+scripts/long_term_forecast/Sp_script/MICN.sh
+scripts/long_term_forecast/Sp_script/Nonstationary_Transformer.sh
+scripts/long_term_forecast/Sp_script/PatchTST.sh
+scripts/long_term_forecast/Sp_script/Pyraformer.sh
+scripts/long_term_forecast/Sp_script/SegRNN.sh
+scripts/long_term_forecast/Sp_script/TimeMixer.sh
+scripts/long_term_forecast/Sp_script/TimesNet.sh
+scripts/long_term_forecast/Sp_script/Transformer.sh
+scripts/long_term_forecast/Sp_script/TSMixer.sh
